@@ -1,0 +1,9 @@
+project:
+  name: singularity-32b
+  seed: 42
+  precision: bfloat16
+paths:
+  artifacts_dir: artifacts
+  checkpoint_dir: artifacts/checkpoints
+  hf_repo_id: null
+  tokenizer_path: null

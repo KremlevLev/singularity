@@ -1,0 +1,15 @@
+alignment:
+  phase: grpo
+  group_size: 8
+  max_new_tokens: 2048
+  temperature: 0.7
+  kl_coef: 0.04
+  learning_rate: 5.0e-6
+  reward_timeout_seconds: 30
+  checkpoint:
+    every_steps: 500
+    keep_last: 3
+
+data:
+  prompts_parquet: null
+  verifier: auto
