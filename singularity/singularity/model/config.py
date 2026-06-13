@@ -64,3 +64,20 @@ class SingularityConfig:
             dora_rank=int(data.get("dora_rank", data.get("dora", {}).get("rank", cls.dora_rank))),
             quantization=QuantizationConfig(**(data.get("quantization") or {})),
         )
+
+@classmethod
+    def get_debug_config(cls) -> "SingularityConfig":
+        """Возвращает крошечный конфиг для тестов на CPU."""
+        return cls(
+            vocab_size=1024,      # Маленький словарь для тестов
+            hidden_size=128,      # Крошечная размерность
+            intermediate_size=256,
+            num_layers=2,         # Всего 2 слоя
+            num_heads=4,
+            num_kv_heads=2,
+            max_seq_len=256,
+            mla=None,             # Отключаем тяжелые фичи для начала
+            moe=None,
+            dora_rank=8
+        )
+

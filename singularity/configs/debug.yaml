@@ -1,0 +1,47 @@
+model:
+  vocab_size: 1024
+  hidden_size: 128
+  intermediate_size: 256
+  num_layers: 2
+  num_heads: 4
+  num_kv_heads: 2
+  max_seq_len: 256
+  rope_theta: 10000.0
+  tie_embeddings: false
+
+  mla:
+    latent_kv_dim: 32
+    q_lora_rank: 8
+    kv_lora_rank: 32
+
+  moe:
+    num_experts: 4
+    shared_experts: 1
+    routed_experts: 3
+    top_k: 1
+    expert_capacity_factor: 1.25
+
+  dora:
+    enabled: false
+    rank: 8
+
+  quantization:
+    enabled: false
+
+training:
+  phase: sft
+  batch_size: 1
+  seq_len: 128
+  max_steps: 5
+  gradient_accumulation_steps: 1
+  dtype: float32
+  remat: false
+  optimizer:
+    lr: 1.0e-3
+    weight_decay: 0.0
+    warmup_steps: 0
+    max_grad_norm: 1.0
+
+sharding:
+  mesh_shape: [1]
+  mesh_axes: ["data"]

@@ -6,6 +6,496 @@
 
 ---
 
+## TODO — рабочая чеклист-карта проекта
+
+Используй этот раздел как основной список задач. Отмечай выполненное вручную: меняй `- [ ]` на `- [x]`. Не отмечай пункт, пока код не написан, не проходит минимальный тест и не сломал предыдущий pipeline.
+
+Как пользоваться:
+
+1. Иди строго сверху вниз.
+2. Не перескакивай на MoE/MLA/DoRA/GRPO, пока не закрыт базовый train loop.
+3. После каждого крупного пункта запускай smoke-test или pytest.
+4. Если пункт стал неактуальным — замени `- [ ]` на `- [-]` и коротко напиши почему.
+5. Если пункт требует исследования — поставь `- [?]`, но не двигайся дальше без решения.
+
+---
+
+### 0. Подготовка окружения
+
+- [x] Установить Python >= 3.10.
+- [x] Установить зависимости из [`requirements.txt`](requirements.txt:1).
+- [x] Проверить, что `jax` импортируется.
+- [x] Проверить backend: `jax.default_backend()`.
+- [x] Проверить количество устройств: `len(jax.devices())`.
+- [x] На Kaggle TPU убедиться, что backend равен `tpu`.
+- [x] Проверить, что [`singularity/utils/tpu.py`](singularity/utils/tpu.py:1) запускается без ошибок.
+- [x] Проверить, что `python main.py --help` работает.
+- [x] Проверить, что `scripts/run_sft.py --help` работает.
+- [x] Проверить, что `scripts/run_grpo.py --help` работает.
+- [x] Убедиться, что `artifacts/`, `checkpoints/`, `logs/` игнорируются [`.gitignore`](.gitignore:1).
+- [x] Убедиться, что в Git не попадают большие датасеты и чекпоинты.
+
+---
+
+### 1. Tiny config
+
+- [ ] Создать [`configs/debug_small.yaml`](configs/debug_small.yaml:1).
+- [ ] Поставить `vocab_size <= 1024`.
+- [ ] Поставить `hidden_size <= 256`.
+- [ ] Поставить `num_layers <= 2`.
+- [ ] Поставить `num_heads <= 4`.
+- [ ] Поставить `max_seq_len <= 512`.
+- [ ] Отключить `moe.enabled` или временно не использовать MoE.
+- [ ] Отключить `dora.enabled`.
+- [ ] Отключить `quantization.enabled`.
+- [ ] Поставить `training.batch_size = 1`.
+- [ ] Поставить `training.max_steps <= 10`.
+- [ ] Проверить, что конфиги мержатся через [`singularity/utils/config.py`](singularity/utils/config.py:1).
+- [ ] Проверить, что [`SingularityConfig.from_dict()`](singularity/model/config.py:68) создает config без ошибок.
+
+---
+
+### 2. Synthetic batch
+
+- [ ] Добавить `make_synthetic_batch()` в [`singularity/data/batch.py`](singularity/data/batch.py:1).
+- [ ] Сделать `input_ids` shape `[batch_size, seq_len]`.
+- [ ] Сделать `labels` shape `[batch_size, seq_len]`.
+- [ ] Сделать `attention_mask` dtype `bool`.
+- [ ] Сделать `input_ids` / `labels` dtype `int32` или `int64`.
+- [ ] Проверить, что `make_training_batch()` конвертирует dict в JAX arrays.
+- [ ] Добавить `tests/test_batch.py`.
+- [ ] Проверить, что synthetic batch проходит без OOM.
+- [ ] Проверить, что synthetic batch работает на CPU и на TPU.
+
+---
+
+### 3. Embeddings
+
+- [ ] Проверить [`LlamaEmbeddingAdapter`](singularity/model/embeddings.py:5) на tiny config.
+- [ ] Проверить output shape: `[batch, seq_len, hidden_size]`.
+- [ ] Проверить dtype: желательно `bfloat16` для TPU или `float32` для отладки.
+- [ ] Добавить тест `tests/test_embeddings.py`.
+- [ ] Проверить, что `params["embedder"]["embedding"].shape == (vocab_size, hidden_size)`.
+
+---
+
+### 4. SwiGLU FFN
+
+- [ ] Проверить [`SwiGLU`](singularity/model/ffn.py:5) на случайном input.
+- [ ] Проверить output shape: `[batch, seq_len, hidden_size]`.
+- [ ] Проверить, что `intermediate_size` используется корректно.
+- [ ] Добавить тест `tests/test_ffn.py`.
+- [ ] Проверить finite output без NaN.
+
+---
+
+### 5. RoPE
+
+- [ ] Реализовать настоящий `apply_rope()` в [`singularity/model/rope.py`](singularity/model/rope.py:5).
+- [ ] Проверить rotary dim.
+- [ ] Проверить `position_ids`.
+- [ ] Проверить output shape равен input shape.
+- [ ] Проверить, что RoPE не ломает dtype.
+- [ ] Добавить тест `tests/test_rope_real.py`.
+- [ ] Позже добавить YaRN / context scaling.
+
+---
+
+### 6. Causal attention
+
+- [ ] Реализовать простую causal attention в [`singularity/model/attention.py`](singularity/model/attention.py:1).
+- [ ] Сначала сделать обычную MHA.
+- [ ] Потом добавить GQA/MQA через `num_kv_heads`.
+- [ ] Проверить causal mask.
+- [ ] Проверить output shape: `[batch, seq_len, hidden_size]`.
+- [ ] Проверить backward через `jax.value_and_grad`.
+- [ ] Добавить тест `tests/test_attention.py`.
+- [ ] Не переходить к MLA, пока обычная attention не работает.
+
+---
+
+### 7. Transformer block
+
+- [ ] Создать нормализацию перед/после attention.
+- [ ] Собрать residual connection для attention.
+- [ ] Собрать residual connection для FFN.
+- [ ] Проверить один transformer block.
+- [ ] Проверить output shape.
+- [ ] Проверить finite output.
+- [ ] Добавить тест `tests/test_transformer_block.py`.
+- [ ] Проверить, что один шаг backward не дает NaN.
+
+---
+
+### 8. Full transformer forward
+
+- [ ] Проверить [`SingularityTransformer`](singularity/model/transformer.py:13) на tiny config.
+- [ ] Проверить `logits.shape == (batch, seq_len, vocab_size)`.
+- [ ] Проверить, что `lm_head` использует правильные размеры.
+- [ ] Проверить forward без MoE.
+- [ ] Проверить forward с `moe=None`.
+- [ ] Добавить тест `tests/test_transformer_forward.py`.
+- [ ] Сохранить tiny forward smoke-test.
+
+---
+
+### 9. Language modeling loss
+
+- [ ] Проверить [`language_modeling_loss()`](singularity/training/losses.py:7).
+- [ ] Проверить labels shape `[batch, seq_len]`.
+- [ ] Проверить mask shape `[batch, seq_len]`.
+- [ ] Проверить scalar loss.
+- [ ] Проверить finite loss.
+- [ ] Проверить, что pad tokens можно игнорировать через mask.
+- [ ] Добавить тест `tests/test_loss_real.py`.
+
+---
+
+### 10. Optax state
+
+- [ ] Проверить [`TrainState`](singularity/training/state.py:8).
+- [ ] Проверить `build_train_state()`.
+- [ ] Проверить optimizer: AdamW.
+- [ ] Проверить gradient clipping.
+- [ ] Проверить, что `state.step` увеличивается.
+- [ ] Проверить, что `opt_state` не ломает shapes.
+- [ ] Добавить тест `tests/test_state.py`.
+
+---
+
+### 11. Train step
+
+- [ ] Реализовать настоящий `train_step()` в [`singularity/training/train_sft.py`](singularity/training/train_sft.py:1).
+- [ ] Использовать `jax.value_and_grad`.
+- [ ] Вернуть `new_params`, `new_state`, `metrics`.
+- [ ] Проверить один шаг на synthetic batch.
+- [ ] Проверить, что loss уменьшается хотя бы на sanity check.
+- [ ] Проверить grad norm.
+- [ ] Добавить тест `tests/test_train_step.py`.
+- [ ] Убрать `NotImplementedError` из базового SFT loop.
+
+---
+
+### 12. JIT train step
+
+- [ ] Обернуть `train_step()` в `jax.jit`.
+- [ ] Проверить первую компиляцию на tiny config.
+- [ ] Проверить, что repeated steps работают быстрее.
+- [ ] Проверить, что jit не ломает checkpoint state.
+- [ ] Добавить smoke-test `tests/test_jit_train_step.py`.
+- [ ] Не добавлять remat, пока jit без remat не работает.
+
+---
+
+### 13. Orbax checkpoint
+
+- [ ] Проверить [`build_checkpoint_manager()`](singularity/training/checkpoint.py:8).
+- [ ] Сохранить dummy state.
+- [ ] Восстановить dummy state.
+- [ ] Сохранить `params`.
+- [ ] Сохранить `opt_state`.
+- [ ] Сохранить `step`.
+- [ ] Сохранить `config`.
+- [ ] Проверить resume после restore.
+- [ ] Добавить тест `tests/test_checkpoint.py`.
+- [ ] Настроить `checkpoint.every_steps`.
+- [ ] Настроить `checkpoint.keep_last`.
+
+---
+
+### 14. Logging and metrics
+
+- [ ] Проверить [`setup_logging()`](singularity/utils/logging.py:15).
+- [ ] Логировать `step`.
+- [ ] Логировать `loss`.
+- [ ] Логировать `grad_norm`.
+- [ ] Логировать `learning_rate`.
+- [ ] Логировать `tokens_per_second`.
+- [ ] Добавить tqdm/rich progress.
+- [ ] Проверить, что logs не пишутся в Git.
+- [ ] Добавить `logs/` в `.gitignore`, если нужно.
+
+---
+
+### 15. Data pipeline
+
+- [ ] Проверить [`TokenizerAdapter`](singularity/data/tokenization.py:8).
+- [ ] Проверить `encode()`.
+- [ ] Проверить `decode()`.
+- [ ] Проверить `pad_batch()`.
+- [ ] Проверить [`build_dataset_mix()`](singularity/data/preprocessing.py:8).
+- [ ] Проверить Polars `scan_parquet`.
+- [ ] Проверить `sink_parquet`.
+- [ ] Проверить `load_parquet_dataset()`.
+- [ ] Проверить `iter_numpy_batches()`.
+- [ ] Создать маленький synthetic parquet.
+- [ ] Прогнать tiny parquet через preprocessing.
+- [ ] Подать tokenized batch в train loop.
+- [ ] Добавить `tests/test_tokenization.py`.
+- [ ] Добавить `tests/test_preprocessing.py`.
+
+---
+
+### 16. TPU sharding
+
+- [ ] Проверить [`build_mesh()`](singularity/training/sharding.py:9).
+- [ ] Создать mesh `[8]`.
+- [ ] Создать mesh `[1, 8, 1]`.
+- [ ] Проверить `NamedSharding`.
+- [ ] Проверить `PartitionSpec`.
+- [ ] Проверить data parallel.
+- [ ] Проверить tensor parallel на маленьком тензоре.
+- [ ] Проверить, что train step работает на 8 cores.
+- [ ] Добавить notebook или smoke-test для sharding.
+- [ ] Не shard'ить MoE до stable dense training.
+
+---
+
+### 17. Remat / gradient checkpointing
+
+- [ ] Добавить `jax.remat` для transformer block.
+- [ ] Проверить, что backward работает.
+- [ ] Сравнить memory usage до/после remat.
+- [ ] Сравнить compile time до/после remat.
+- [ ] Проверить tiny config.
+- [ ] Добавить config flag `training.remat`.
+- [ ] Не включать remat по умолчанию, пока он не протестирован.
+
+---
+
+### 18. `jax.lax.scan` over layers
+
+- [ ] Рефакторить transformer layers в список/структуру.
+- [ ] Заменить Python-for по слоям на `lax.scan`, если нужно.
+- [ ] Проверить output shape.
+- [ ] Проверить backward.
+- [ ] Проверить checkpoint compatibility.
+- [ ] Сравнить compile time и runtime.
+- [ ] Добавить smoke-test `tests/test_scan_layers.py`.
+
+---
+
+### 19. MoE base routing
+
+- [ ] Проверить [`ExpertChoiceRouter`](singularity/model/moe.py:8).
+- [ ] Реализовать token-choice routing.
+- [ ] Проверить router logits shape.
+- [ ] Проверить router probs shape.
+- [ ] Проверить `top_k`.
+- [ ] Проверить `num_experts`.
+- [ ] Проверить `shared_experts`.
+- [ ] Проверить `routed_experts`.
+- [ ] Добавить тест `tests/test_moe_routing_real.py`.
+
+---
+
+### 20. MoE losses
+
+- [ ] Проверить [`load_balancing_loss()`](singularity/training/losses.py:22).
+- [ ] Проверить [`router_z_loss()`](singularity/training/losses.py:17).
+- [ ] Проверить коэффициенты из `configs/model.yaml`.
+- [ ] Добавить router loss к total loss.
+- [ ] Проверить finite total loss.
+- [ ] Проверить, что router не коллапсирует в один expert.
+- [ ] Добавить тест `tests/test_moe_losses.py`.
+
+---
+
+### 21. Shared and routed experts
+
+- [ ] Реализовать shared experts.
+- [ ] Реализовать routed experts.
+- [ ] Проверить expert outputs shape.
+- [ ] Проверить token assignment.
+- [ ] Проверить padding.
+- [ ] Проверить expert capacity.
+- [ ] Проверить, что все tokens обрабатываются.
+- [ ] Проверить, что нет token dropping без явного флага.
+- [ ] Добавить тест `tests/test_shared_routed_moe.py`.
+
+---
+
+### 22. Expert-choice routing
+
+- [ ] Реализовать expert-choice top-N tokens.
+- [ ] Проверить static shapes.
+- [ ] Проверить padding до expert capacity.
+- [ ] Проверить баланс нагрузки.
+- [ ] Проверить на tiny config.
+- [ ] Проверить на 8 TPU cores.
+- [ ] Не включать expert-choice, пока token-choice не стабилен.
+- [ ] Добавить smoke-test `tests/test_expert_choice_routing.py`.
+
+---
+
+### 23. MLA attention
+
+- [ ] Реализовать latent KV projection.
+- [ ] Проверить `latent_kv_dim`.
+- [ ] Проверить `q_lora_rank`.
+- [ ] Проверить `kv_lora_rank`.
+- [ ] Реализовать compressed KV cache.
+- [ ] Проверить causal mask.
+- [ ] Проверить output shape.
+- [ ] Проверить backward.
+- [ ] Добавить тест `tests/test_mla_attention.py`.
+- [ ] Не переходить к Ring Attention, пока MLA без ring работает.
+
+---
+
+### 24. Decoupled RoPE / YaRN
+
+- [ ] Отделить RoPE от compressed KV.
+- [ ] Проверить, что RoPE применяется к нужным head dimensions.
+- [ ] Проверить long context smoke-test.
+- [ ] Добавить YaRN scaling.
+- [ ] Проверить 2k context.
+- [ ] Проверить 8k context.
+- [ ] Проверить 16k context.
+- [ ] Добавить тест `tests/test_decoupled_rope.py`.
+
+---
+
+### 25. Ring Attention
+
+- [ ] Спроектировать segment splitting.
+- [ ] Проверить communication pattern.
+- [ ] Реализовать prototype на 2 segments.
+- [ ] Проверить на 8 TPU cores.
+- [ ] Проверить KV block transfer.
+- [ ] Проверить causal masking across segments.
+- [ ] Проверить long context 64k/128k smoke-test.
+- [ ] Добавить отдельный notebook для Ring Attention.
+- [ ] Не смешивать Ring Attention с первой MLA-реализацией.
+
+---
+
+### 26. DoRA
+
+- [ ] Проверить [`DoRALinear`](singularity/model/dora.py:5).
+- [ ] Реализовать LoRA part.
+- [ ] Реализовать magnitude vector.
+- [ ] Проверить freeze base weights.
+- [ ] Проверить trainable adapters only.
+- [ ] Проверить merge formula.
+- [ ] Проверить [`merge_dora_linear()`](singularity/serving/merge.py:8).
+- [ ] Добавить тест `tests/test_dora.py`.
+- [ ] Не включать DoRA, пока full fine-tuning не стабилен.
+
+---
+
+### 27. Fake INT4 QAT
+
+- [ ] Проверить [`fake_int4_weight()`](singularity/model/quantization.py:15).
+- [ ] Проверить fake quant forward.
+- [ ] Проверить gradients через fake quant.
+- [ ] Оставить embeddings в BF16.
+- [ ] Оставить router в BF16.
+- [ ] Оставить sensitive MLA matrices в BF16.
+- [ ] Проверить memory savings.
+- [ ] Позже подключить AQT/Qwix.
+- [ ] Добавить тест `tests/test_quantization.py`.
+
+---
+
+### 28. SFT training loop
+
+- [ ] Загрузить реальные tokenized shards.
+- [ ] Сделать epoch/shuffle logic.
+- [ ] Сделать gradient accumulation.
+- [ ] Сделать checkpoint every N steps.
+- [ ] Сделать resume from latest checkpoint.
+- [ ] Сделать validation loop.
+- [ ] Сделать eval loss.
+- [ ] Сделать HF upload через [`scripts/export_checkpoint.py`](scripts/export_checkpoint.py:1).
+- [ ] Проверить долгий запуск на Kaggle.
+- [ ] Добавить `tests/test_sft_pipeline.py` или smoke script.
+
+---
+
+### 29. GRPO sampler
+
+- [ ] Проверить [`sample_tokens()`](singularity/alignment/sampler.py:8).
+- [ ] Sample 2 ответа на маленький prompt.
+- [ ] Sample 4 ответа.
+- [ ] Sample 8 ответов.
+- [ ] Проверить `max_new_tokens`.
+- [ ] Проверить `temperature`.
+- [ ] Проверить attention mask при generation.
+- [ ] Добавить тест `tests/test_sampler.py`.
+
+---
+
+### 30. GRPO rewards
+
+- [ ] Проверить [`verify_math_answer()`](singularity/alignment/rewards.py:8).
+- [ ] Проверить [`verify_code_compiles()`](singularity/alignment/rewards.py:17).
+- [ ] Добавить code unit-test verifier.
+- [ ] Добавить math parser.
+- [ ] Добавить timeout для code execution.
+- [ ] Проверить reward range `[0, 1]`.
+- [ ] Добавить тест `tests/test_rewards.py`.
+
+---
+
+### 31. GRPO update
+
+- [ ] Реализовать group advantage.
+- [ ] Добавить KL penalty.
+- [ ] Добавить policy loss.
+- [ ] Добавить gradient update.
+- [ ] Проверить один GRPO step.
+- [ ] Проверить finite loss.
+- [ ] Проверить checkpoint после GRPO.
+- [ ] Добавить тест `tests/test_grpo_step.py`.
+- [ ] Не запускать большой GRPO до stable SFT checkpoint.
+
+---
+
+### 32. Serving
+
+- [ ] Проверить [`create_app()`](singularity/serving/api.py:13).
+- [ ] Запустить FastAPI локально.
+- [ ] Проверить `/generate`.
+- [ ] Добавить restore checkpoint.
+- [ ] Добавить request `max_new_tokens`.
+- [ ] Добавить request `temperature`.
+- [ ] Добавить streaming response.
+- [ ] Проверить [`run_api()`](singularity/serving/api.py:31).
+- [ ] Добавить `tests/test_api.py` или smoke curl.
+
+---
+
+### 33. Merge and export
+
+- [ ] Проверить checkpoint restore.
+- [ ] Проверить base weights merge.
+- [ ] Проверить DoRA merge.
+- [ ] Проверить exported checkpoint shape.
+- [ ] Проверить serving на merged checkpoint.
+- [ ] Проверить HF upload.
+- [ ] Проверить GGUF/EXL2 export pipeline, если нужен.
+- [ ] Добавить smoke script `scripts/merge_dora.py`.
+
+---
+
+### 34. Final hardening
+
+- [ ] Прогнать `pytest -q`.
+- [ ] Прогнать `python main.py --help`.
+- [ ] Прогнать tiny SFT на CPU.
+- [ ] Прогнать tiny SFT на TPU.
+- [ ] Прогнать checkpoint save/restore.
+- [ ] Прогнать serving smoke-test.
+- [ ] Проверить README.
+- [ ] Проверить instruction.
+- [ ] Проверить `.gitignore`.
+- [ ] Удалить временные файлы.
+- [ ] Удалить `__pycache__/`.
+- [ ] Зафиксировать текущий milestone в Git.
+
+---
+
 ## Целевая архитектура
 
 Проект ориентирован на модель с такими идеями:
