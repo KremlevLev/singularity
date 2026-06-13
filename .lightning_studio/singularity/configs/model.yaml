@@ -1,0 +1,34 @@
+model:
+  vocab_size: 128256
+  hidden_size: 4096
+  intermediate_size: 11008
+  num_layers: 64
+  num_heads: 32
+  num_kv_heads: 8
+  max_seq_len: 16384
+  rope_theta: 500000.0
+  tie_embeddings: false
+
+  mla:
+    latent_kv_dim: 512
+    q_lora_rank: 64
+    kv_lora_rank: 512
+
+  moe:
+    num_experts: 16
+    shared_experts: 2
+    routed_experts: 14
+    top_k: 2
+    expert_capacity_factor: 1.25
+    noisy_gating: true
+    router_z_loss_coef: 1e-4
+    load_balance_coef: 1e-3
+
+  dora:
+    enabled: true
+    rank: 128
+
+  quantization:
+    enabled: false
+    dtype: int4
+    qat: true

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build/dist
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# JAX / ML artifacts
+artifacts/
+checkpoints/
+*.ckpt
+*.orbax
+*.safetensors
+*.pth
+*.bin
+
+# Local notebooks and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Kaggle / HF temp
+hf_cache/
+hf_hub/
