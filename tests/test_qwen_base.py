@@ -9,7 +9,7 @@ import os
 import json
 
 devices = jax.devices()
-devices_mesh = devices.reshape(1,8)
+devices_mesh = devices.reshape(1,2)
 # =====================================================================
 # ШАГ 1: НАСТРОЙКА ГЕОМЕТРИИ ЖЕЛЕЗА (SHARDING)
 # =====================================================================
