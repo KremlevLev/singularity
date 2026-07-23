@@ -103,25 +103,28 @@ def load_and_shard_weights(model_dir, weight_map, sharding_repl_1d, sharding_col
             raw_norm = f.get_tensor(norm_key)
         flax_params[layer_key]["input_layernorm"]["weight"] = jax.device_put(raw_norm, sharding_repl_1d)
         
-        # 2. Загрузка Gate & Up проекций (2D)
+# 2. Загрузка Gate & Up проекций (2D)
         gate_key = f"model.layers.{i}.mlp.gate_proj.weight"
         gate_file = os.path.join(model_dir, weight_map[gate_key])
         with safe_open(gate_file, framework="np", device="cpu") as f:
             raw_gate = f.get_tensor(gate_key)
-        flax_params[layer_key]["mlp"]["gate_proj"]["kernel"] = jax.device_put(raw_gate.T, sharding_col)
+        # ИСПРАВЛЕНИЕ: присваиваем словарь целиком
+        flax_params[layer_key]["mlp"]["gate_proj"] = {"kernel": jax.device_put(raw_gate.T, sharding_col)}
         
         up_key = f"model.layers.{i}.mlp.up_proj.weight"
         up_file = os.path.join(model_dir, weight_map[up_key])
         with safe_open(up_file, framework="np", device="cpu") as f:
             raw_up = f.get_tensor(up_key)
-        flax_params[layer_key]["mlp"]["up_proj"]["kernel"] = jax.device_put(raw_up.T, sharding_col)
+        # ИСПРАВЛЕНИЕ: присваиваем словарь целиком
+        flax_params[layer_key]["mlp"]["up_proj"] = {"kernel": jax.device_put(raw_up.T, sharding_col)}
         
         # 3. Загрузка Down проекции (2D)
         down_key = f"model.layers.{i}.mlp.down_proj.weight"
         down_file = os.path.join(model_dir, weight_map[down_key])
         with safe_open(down_file, framework="np", device="cpu") as f:
             raw_down = f.get_tensor(down_key)
-        flax_params[layer_key]["mlp"]["down_proj"]["kernel"] = jax.device_put(raw_down.T, sharding_row)
+        # ИСПРАВЛЕНИЕ: присваиваем словарь целиком
+        flax_params[layer_key]["mlp"]["down_proj"] = {"kernel": jax.device_put(raw_down.T, sharding_row)}
         
         del raw_norm, raw_gate, raw_up, raw_down
         gc.collect()
