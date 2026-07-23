@@ -339,12 +339,22 @@ for i in range(NUM_LAYERS):
     up_kernel_jax = tpu_params["params"][layer_key]["mlp"]["up_proj"]["kernel"]
     down_kernel_jax = tpu_params["params"][layer_key]["mlp"]["down_proj"]["kernel"]
     
-    # Конвертируем JAX-массивы в тензоры PyTorch через numpy-представление.
-    # В JAX Dense-ядро хранится как [in, out], поэтому транспонируем его (.T) обратно в [out, in] для PyTorch
-    norm_weight = torch.from_numpy(np.array(norm_weight_jax)).to(torch.bfloat16)
-    gate_weight = torch.from_numpy(np.array(gate_kernel_jax.T)).to(torch.bfloat16)
-    up_weight = torch.from_numpy(np.array(up_kernel_jax.T)).to(torch.bfloat16)
-    down_weight = torch.from_numpy(np.array(down_kernel_jax.T)).to(torch.bfloat16)
+    # Конвертируем JAX-массивы в тензоры PyTorch через float32, чтобы избежать ошибки с ml_dtypes.bfloat16
+    norm_weight = torch.from_numpy(
+        np.array(norm_weight_jax.astype(jnp.float32))
+    ).to(torch.bfloat16)
+    
+    gate_weight = torch.from_numpy(
+        np.array(gate_kernel_jax.T.astype(jnp.float32))
+    ).to(torch.bfloat16)
+    
+    up_weight = torch.from_numpy(
+        np.array(up_kernel_jax.T.astype(jnp.float32))
+    ).to(torch.bfloat16)
+    
+    down_weight = torch.from_numpy(
+        np.array(down_kernel_jax.T.astype(jnp.float32))
+    ).to(torch.bfloat16)
     
     # Вычисляем выход текущего слоя
     x_torch = torch_mlp_reference(
