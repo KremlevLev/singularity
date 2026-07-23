@@ -1,5 +1,5 @@
 import json
-import urllib.request
+import requests
 import os
 from kaggle_secrets import UserSecretsClient
 # Пытаемся прочитать переменные из окружения
@@ -16,29 +16,17 @@ except Exception:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
 
-
 def send_telegram_notification(text: str):
     """Отправляет текстовое уведомление в Telegram."""
-    url = f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_USER_ID, "text": text, "parse_mode": "Markdown"}
 
-    headers = {"Content-Type": "application/json"}
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"), headers=headers
-    )
-
-    try:
-        with urllib.request.urlopen(req) as response:
-            if response.status == 200:
-                print("Уведомление в Telegram успешно отправлено!")
-            else:
-                print(f"Ошибка отправки Telegram: статус {response.status}")
-    except Exception as e:
-        print(f"Не удалось отправить уведомление в Telegram: {e}")
-
-
-# Отправляем сигнал о старте скрипта
-send_telegram_notification(
-    "🚀 *Скрипт на Kaggle успешно запущен!*\n"
-    "Очередь пройдена, TPU инициализирован. Начинаю подготовку к обучению модели Qwen."
-)
+    payload = {
+        "chat_id": TELEGRAM_USER_ID, 
+        "text": text, 
+        "parse_mode": "Markdown"
+    }
+    
+    # Отправляем POST-запрос на эндпоинт Telegram
+    response = requests.post(url, json=payload)
+    return response.json()
