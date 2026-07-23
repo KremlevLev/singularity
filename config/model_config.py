@@ -7,7 +7,7 @@ class ModelConfig:
     """
     Архитектурные параметры гибридной модели Qwen3-14B (36 Mamba-2 + 12 GQA).
     """
-    # --- Основные параметры (Qwen2.5-14B) ---
+    # --- Основные параметры (Qwen3-14B) ---
     vocab_size: int = 152064
     hidden_size: int = 5120
     num_hidden_layers: int = 48
