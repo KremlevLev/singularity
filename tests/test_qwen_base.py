@@ -112,6 +112,7 @@ class FlaxQwenDecoder(nn.Module):
     hidden_size: int
     intermediate_size: int
     num_layers: int = 40  # Значение по умолчанию, если не передано
+    rms_norm_eps: float
 
     @nn.compact
     def __call__(self, x):
