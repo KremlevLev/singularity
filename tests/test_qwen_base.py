@@ -104,17 +104,24 @@ class FlaxModelLayer(nn.Module):
     @nn.compact
     def __call__(self, x):
         residual = x
-        x = FlaxRMSNorm(dim=5120, name="input_layernorm")(x)
-        x = FlaxQwenMLP(hidden_size=5120, intermediate_size=13824, name="mlp")(x)
+        x = FlaxRMSNorm(dim=HIDDEN_SIZE, name="input_layernorm")(x)
+        x = FlaxQwenMLP(hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE, name="mlp")(x)
         return residual + x
 
-# Обертка над всеми 40 слоями модели
 class FlaxQwenDecoder(nn.Module):
-    num_layers: int = 40
-    @nn.compact
+    hidden_size: int
+    intermediate_size: int
+    num_layers: int = 40  # Значение по умолчанию, если не передано
+
+    @nn.Compact
     def __call__(self, x):
         for i in range(self.num_layers):
-            x = FlaxModelLayer(name=f"layers_{i}")(x)
+            # Передаем параметры конфигурации дальше в каждый слой
+            x = FlaxModelLayer(
+                hidden_size=self.hidden_size, 
+                intermediate_size=self.intermediate_size, 
+                name=f"layers_{i}"
+            )(x)
         return x
 
 # =====================================================================
