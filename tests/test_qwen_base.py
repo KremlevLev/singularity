@@ -113,7 +113,7 @@ class FlaxQwenDecoder(nn.Module):
     intermediate_size: int
     num_layers: int = 40  # Значение по умолчанию, если не передано
 
-    @nn.Compact
+    @nn.compact
     def __call__(self, x):
         for i in range(self.num_layers):
             # Передаем параметры конфигурации дальше в каждый слой
