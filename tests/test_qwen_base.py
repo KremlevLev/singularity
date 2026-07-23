@@ -11,6 +11,11 @@ import torch
 import torch.nn.functional as F
 import json
 from huggingface_hub import snapshot_download
+from scripts.tg_notifier import send_telegram_notification
+
+notify=1
+if notify:
+    send_telegram_notification("success")
 
 TEST_NUM_LAYERS = 1
 
