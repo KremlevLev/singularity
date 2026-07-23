@@ -31,7 +31,7 @@ sharding_col = NamedSharding(mesh, P(None, 'tensor'))
 # 3. Горизонтальная маска (по строкам)
 sharding_row = NamedSharding(mesh, P('tensor', None))
 
-model_dir = "/kaggle/input/qwen/qwen3-14b/transformers/default/1"
+model_dir = "/kaggle/input/models/qwen-lm/qwen/pytorch/14b/1"
 
 # =====================================================================
 # ШАГ 2: СТРУКТУРА МОДЕЛИ НА FLAX
