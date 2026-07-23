@@ -101,29 +101,47 @@ class FlaxQwenMLP(nn.Module):
         return output
 
 class FlaxModelLayer(nn.Module):
+    hidden_size: int
+    intermediate_size: int
+    rms_norm_eps: float = 1e-6
+
     @nn.compact
     def __call__(self, x):
         residual = x
-        x = FlaxRMSNorm(dim=HIDDEN_SIZE, name="input_layernorm")(x)
-        x = FlaxQwenMLP(hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE, name="mlp")(x)
+
+        x = FlaxRMSNorm(
+            dim=self.hidden_size,
+            eps=self.rms_norm_eps,
+            name="input_layernorm",
+        )(x)
+
+        x = FlaxQwenMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            name="mlp",
+        )(x)
+
         return residual + x
+
 
 class FlaxQwenDecoder(nn.Module):
     hidden_size: int
     intermediate_size: int
-    num_layers: int = 40  # Значение по умолчанию, если не передано
-    rms_norm_eps: float
+    num_layers: int
+    rms_norm_eps: float = 1e-6
 
     @nn.compact
     def __call__(self, x):
         for i in range(self.num_layers):
-            # Передаем параметры конфигурации дальше в каждый слой
             x = FlaxModelLayer(
-                hidden_size=self.hidden_size, 
-                intermediate_size=self.intermediate_size, 
-                name=f"layers_{i}"
+                hidden_size=self.hidden_size,
+                intermediate_size=self.intermediate_size,
+                rms_norm_eps=self.rms_norm_eps,
+                name=f"layers_{i}",
             )(x)
+
         return x
+
 
 # =====================================================================
 # ШАГ 3: ЗАГРУЗКА И НАРЕЗКА ВЕСОВ С ЛОКАЛЬНОГО КЭША HF
@@ -138,11 +156,13 @@ def load_and_shard_weights(
     sharding_row,
 ):
     flax_params = {}
-    
-    for i in range(NUM_LAYERS): 
-        layer_key = f"layers_{i}"
-        flax_params[layer_key] = {"input_layernorm": {}, "mlp": {}}
 
+    for i in range(num_layers):
+        layer_key = f"layers_{i}"
+        flax_params[layer_key] = {
+            "input_layernorm": {},
+            "mlp": {},
+        }
         # ИСПОЛЬЗУЕМ 1D-МАСКУ ДЛЯ RMSNORM ВЕКТОРА
         norm_key = f"model.layers.{i}.input_layernorm.weight"
         norm_file = os.path.join(model_dir, weight_map[norm_key])
@@ -212,8 +232,15 @@ tpu_params = load_and_shard_weights(
 )
 
 # Б. Подготовка входных токенов (передаем sharding_repl_3d для 3D-массива)
-print("[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim=5120)...")
-dummy_input = jnp.ones((1, 4, 5120), dtype=jnp.float32)
+print(
+    "[Шаг Б] Подготовка входного скрытого состояния "
+    f"(Batch=1, Seq=4, Dim={HIDDEN_SIZE})..."
+)
+
+dummy_input = jnp.ones(
+    (1, 4, HIDDEN_SIZE),
+    dtype=jnp.bfloat16,
+)
 tpu_tokens = jax.device_put(dummy_input, sharding_repl_3d) # Передаем 3D маску
 # В. Запуск вычислений в железе
 print("[Шаг В] Запуск JIT-компиляции графа и инференса на ядрах TPU...")
