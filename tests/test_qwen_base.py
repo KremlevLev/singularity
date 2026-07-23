@@ -7,6 +7,8 @@ import numpy as np
 import gc
 from safetensors import safe_open
 import os
+import torch
+import torch.nn.functional as F
 import json
 from huggingface_hub import snapshot_download
 TEST_NUM_LAYERS = 1
@@ -129,19 +131,28 @@ class FlaxQwenDecoder(nn.Module):
     hidden_size: int
     intermediate_size: int
     num_layers: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
     rms_norm_eps: float = 1e-6
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, position_ids, attention_mask=None):
         for i in range(self.num_layers):
-            x = FlaxMLPResidualBlock(
+            x = FlaxQwenDecoderLayer(
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
+                num_attention_heads=self.num_attention_heads,
+                num_key_value_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
+                rope_theta=self.rope_theta,
                 rms_norm_eps=self.rms_norm_eps,
                 name=f"layers_{i}",
-            )(x)
-
+            )(x, position_ids, attention_mask)
         return x
+
+
 #реализация GQA.
 
 NUM_ATTENTION_HEADS = hf_config[
@@ -202,6 +213,46 @@ def load_and_shard_weights(
             raw_norm,
             sharding_repl_1d,
         )
+        flax_params[layer_key] = {
+            "input_layernorm": {},
+            "post_attention_layernorm": {},
+            "self_attn": {
+                "q_proj": {},
+                "k_proj": {},
+                "v_proj": {},
+                "o_proj": {},
+            },
+            "mlp": {},
+        }
+
+        # input_layernorm (перед attention)
+        norm_key = f"model.layers.{i}.input_layernorm.weight"
+        norm_file = os.path.join(model_dir, weight_map[norm_key])
+        with safe_open(norm_file, framework="np", device="cpu") as f:
+            raw_norm = f.get_tensor(norm_key)
+        flax_params[layer_key]["input_layernorm"]["weight"] = jax.device_put(raw_norm, sharding_repl_1d)
+
+        # post_attention_layernorm (перед MLP) — уже есть
+        # ...
+
+        # Q, K, V, O проекции
+        for proj_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+            hf_key = f"model.layers.{i}.self_attn.{proj_name}.weight"
+            hf_file = os.path.join(model_dir, weight_map[hf_key])
+            with safe_open(hf_file, framework="np", device="cpu") as f:
+                raw_weight = f.get_tensor(hf_key)
+
+            # Q, K, V — sharding_col (делим по выходной размерности)
+            # O — sharding_row (делим по входной размерности)
+            if proj_name == "o_proj":
+                flax_params[layer_key]["self_attn"][proj_name] = {
+                    "kernel": jax.device_put(raw_weight.T, sharding_row)
+                }
+            else:
+                flax_params[layer_key]["self_attn"][proj_name] = {
+                    "kernel": jax.device_put(raw_weight.T, sharding_col)
+                }
+
 
         
 # 2. Загрузка Gate & Up проекций (2D)
@@ -242,9 +293,42 @@ model = FlaxQwenDecoder(
     rms_norm_eps=RMS_NORM_EPS,
 )
 
+class FlaxQwenDecoderLayer(nn.Module):
+    hidden_size: int
+    intermediate_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+    rms_norm_eps: float = 1e-6
+
+    @nn.compact
+    def __call__(self, x, position_ids, attention_mask=None):
+        # Attention residual branch
+        residual = x
+        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="input_layernorm")(x)
+        x = FlaxQwenAttention(
+            hidden_size=self.hidden_size,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            rope_theta=self.rope_theta,
+            name="self_attn",
+        )(x, position_ids, attention_mask)
+        x = residual + x
+        
+        # MLP residual branch
+        residual = x
+        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="post_attention_layernorm")(x)
+        x = FlaxQwenMLP(hidden_size=self.hidden_size, intermediate_size=self.intermediate_size, name="mlp")(x)
+        x = residual + x
+        
+        return x
+
+
 @jax.jit
-def inference_step(weights, x):
-    return model.apply(weights, x)
+def inference_step(weights, x, position_ids, attention_mask=None):
+    return model.apply(weights, x, position_ids, attention_mask)
 
 with open(os.path.join(model_dir, "model.safetensors.index.json"), "r") as f:
     weight_map = json.load(f)["weight_map"]
@@ -255,6 +339,36 @@ k_norm_key = "model.layers.0.self_attn.k_norm.weight"
 print("q_norm present:", q_norm_key in weight_map)
 print("k_norm present:", k_norm_key in weight_map)
 
+def precompute_freqs_cis(dim, max_position, theta):
+    """Предвычисление частот для RoPE."""
+    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2)[: (dim // 2)] / dim))
+    t = jnp.arange(max_position)
+    freqs = jnp.outer(t, freqs)
+    return jnp.cos(freqs), jnp.sin(freqs)
+
+def apply_rotary_emb(q, k, position_ids, theta, head_dim):
+    """Применение Rotary Position Embeddings."""
+    cos, sin = precompute_freqs_cis(head_dim, 131072, theta)  # max_position = 131072 для YaRN
+    
+    cos = cos[position_ids][:, :, None, :]
+    sin = sin[position_ids][:, :, None, :]
+    
+    # Разделяем на две половины для комплексного умножения
+    q1, q2 = q[..., :head_dim//2], q[..., head_dim//2:]
+    k1, k2 = k[..., :head_dim//2], k[..., head_dim//2:]
+    
+    q_rotated = jnp.concatenate([
+        q1 * cos - q2 * sin,
+        q1 * sin + q2 * cos,
+    ], axis=-1)
+    
+    k_rotated = jnp.concatenate([
+        k1 * cos - k2 * sin,
+        k1 * sin + k2 * cos,
+    ], axis=-1)
+    
+    return q_rotated, k_rotated
+
 class FlaxQwenAttention(nn.Module):
     hidden_size: int
     num_attention_heads: int
@@ -263,47 +377,76 @@ class FlaxQwenAttention(nn.Module):
     rope_theta: float
 
     @nn.compact
-    def __call__(
-        self,
-        x,
-        position_ids,
-        attention_mask=None,
-    ):
+    def __call__(self, x, position_ids, attention_mask=None):
+        batch_size, seq_len, _ = x.shape
+        
+        # 1. Проекции Q, K, V
         q = nn.Dense(
             self.num_attention_heads * self.head_dim,
             use_bias=False,
             name="q_proj",
-        )(x)
-
+        )(x)  # (batch, seq, num_heads * head_dim)
+        
         k = nn.Dense(
             self.num_key_value_heads * self.head_dim,
             use_bias=False,
             name="k_proj",
-        )(x)
-
+        )(x)  # (batch, seq, kv_heads * head_dim)
+        
         v = nn.Dense(
             self.num_key_value_heads * self.head_dim,
             use_bias=False,
             name="v_proj",
-        )(x)
-
-        # Следующие этапы:
-        # 1. reshape Q/K/V;
-        # 2. q_norm и k_norm;
-        # 3. RoPE;
-        # 4. GQA attention;
-        # 5. causal mask;
-        # 6. merge heads.
-
-        output = ...
-
+        )(x)  # (batch, seq, kv_heads * head_dim)
+        
+        # 2. Reshape в多头形式
+        q = q.reshape(batch_size, seq_len, self.num_attention_heads, self.head_dim)
+        k = k.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+        v = v.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+        
+        # 3. QK-normalization (если есть в конфиге)
+        # Qwen3 использует qk_layernorm для всех моделей [8]
+        q = nn.RMSNorm(self.head_dim, name="q_norm")(q)
+        k = nn.RMSNorm(self.head_dim, name="k_norm")(k)
+        
+        # 4. RoPE
+        q, k = apply_rotary_emb(q, k, position_ids, self.rope_theta, self.head_dim)
+        
+        # 5. GQA: расширяем K, V до числа query-голов
+        # num_key_value_groups = num_attention_heads // num_key_value_heads
+        num_groups = self.num_attention_heads // self.num_key_value_heads
+        k = jnp.repeat(k, num_groups, axis=2)  # (batch, seq, num_heads, head_dim)
+        v = jnp.repeat(v, num_groups, axis=2)
+        
+        # 6. Scaled dot-product attention с causal mask
+        scale = 1.0 / jnp.sqrt(self.head_dim)
+        attn_weights = jnp.einsum("bqhd,bkhd->bhqk", q, k) * scale
+        
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        
+        # Causal mask
+        causal_mask = jnp.tril(jnp.ones((seq_len, seq_len)))
+        causal_mask = causal_mask.reshape(1, 1, seq_len, seq_len)
+        attn_weights = jnp.where(causal_mask == 0, -1e9, attn_weights)
+        
+        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32)).astype(q.dtype)
+        
+        # 7. Взвешенная сумма значений
+        attn_output = jnp.einsum("bhqk,bkhd->bqhd", attn_weights, v)
+        
+        # 8. Объединение голов
+        attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        
+        # 9. Выходная проекция
         output = nn.Dense(
             self.hidden_size,
             use_bias=False,
             name="o_proj",
-        )(output)
-
+        )(attn_output)
+        
         return output
+
 
 
 # =====================================================================
@@ -359,12 +502,20 @@ print(f"Шардинг: {output_hidden_states.sharding}")
 print(f"Среднее: {float(output_mean)}")
 print("=" * 60)
 
+seq_len = 4
+position_ids = jnp.arange(seq_len)[None, :]  # (1, seq_len)
+
+# Для первого теста можно без маски
+output_hidden_states = inference_step(
+    tpu_params,
+    tpu_tokens,
+    position_ids,
+)
+
+
 """
 тестовые части
 """
-
-import torch
-import torch.nn.functional as F
 
 def torch_rms_norm(x, weight, eps):
     x_fp32 = x.float()
