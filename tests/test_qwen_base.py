@@ -194,8 +194,7 @@ def load_and_shard_weights(
         flax_params[layer_key]["mlp"]["down_proj"] = {"kernel": jax.device_put(raw_down.T, sharding_row)}
         
         del raw_norm, raw_gate, raw_up, raw_down
-        gc.collect()
-        
+        gc.collect()      
     return {"params": flax_params}
 
 # =====================================================================
@@ -241,16 +240,30 @@ dummy_input = jnp.ones(
     (1, 4, HIDDEN_SIZE),
     dtype=jnp.bfloat16,
 )
-tpu_tokens = jax.device_put(dummy_input, sharding_repl_3d) # Передаем 3D маску
-# В. Запуск вычислений в железе
-print("[Шаг В] Запуск JIT-компиляции графа и инференса на ядрах TPU...")
-output_hidden_states = inference_step(tpu_params, tpu_tokens)
+
+tpu_tokens = jax.device_put(
+    dummy_input,
+    sharding_repl_3d,
+)
+
+print("[Шаг В] JIT-компиляция и инференс...")
+
+output_hidden_states = inference_step(
+    tpu_params,
+    tpu_tokens,
+)
+
 output_hidden_states.block_until_ready()
+
+output_mean = jnp.mean(
+    output_hidden_states.astype(jnp.float32)
+)
+output_mean.block_until_ready()
 
 print("\n" + "=" * 60)
 print(f"Результат на {num_devices} устройствах")
 print(f"Форма: {output_hidden_states.shape}")
 print(f"Dtype: {output_hidden_states.dtype}")
 print(f"Шардинг: {output_hidden_states.sharding}")
-print(f"Среднее: {jnp.mean(output_hidden_states.astype(jnp.float32))}")
+print(f"Среднее: {float(output_mean)}")
 print("=" * 60)
