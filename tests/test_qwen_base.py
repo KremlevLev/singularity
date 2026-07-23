@@ -142,6 +142,28 @@ class FlaxQwenDecoder(nn.Module):
             )(x)
 
         return x
+#реализация GQA.
+
+NUM_ATTENTION_HEADS = hf_config[
+    "num_attention_heads"
+]
+NUM_KEY_VALUE_HEADS = hf_config[
+    "num_key_value_heads"
+]
+HEAD_DIM = hf_config.get(
+    "head_dim",
+    HIDDEN_SIZE // NUM_ATTENTION_HEADS,
+)
+ROPE_THETA = hf_config.get(
+    "rope_theta",
+    1_000_000.0,
+)
+
+print("Attention config:")
+print(f"  query heads = {NUM_ATTENTION_HEADS}")
+print(f"  KV heads    = {NUM_KEY_VALUE_HEADS}")
+print(f"  head dim    = {HEAD_DIM}")
+print(f"  RoPE theta  = {ROPE_THETA}")
 
 
 # =====================================================================
@@ -226,6 +248,63 @@ def inference_step(weights, x):
 
 with open(os.path.join(model_dir, "model.safetensors.index.json"), "r") as f:
     weight_map = json.load(f)["weight_map"]
+
+q_norm_key = "model.layers.0.self_attn.q_norm.weight"
+k_norm_key = "model.layers.0.self_attn.k_norm.weight"
+
+print("q_norm present:", q_norm_key in weight_map)
+print("k_norm present:", k_norm_key in weight_map)
+
+class FlaxQwenAttention(nn.Module):
+    hidden_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+
+    @nn.compact
+    def __call__(
+        self,
+        x,
+        position_ids,
+        attention_mask=None,
+    ):
+        q = nn.Dense(
+            self.num_attention_heads * self.head_dim,
+            use_bias=False,
+            name="q_proj",
+        )(x)
+
+        k = nn.Dense(
+            self.num_key_value_heads * self.head_dim,
+            use_bias=False,
+            name="k_proj",
+        )(x)
+
+        v = nn.Dense(
+            self.num_key_value_heads * self.head_dim,
+            use_bias=False,
+            name="v_proj",
+        )(x)
+
+        # Следующие этапы:
+        # 1. reshape Q/K/V;
+        # 2. q_norm и k_norm;
+        # 3. RoPE;
+        # 4. GQA attention;
+        # 5. causal mask;
+        # 6. merge heads.
+
+        output = ...
+
+        output = nn.Dense(
+            self.hidden_size,
+            use_bias=False,
+            name="o_proj",
+        )(output)
+
+        return output
+
 
 # =====================================================================
 # ШАГ 5: ОРКЕСТРАЦИЯ ЗАПУСКА
