@@ -1,21 +1,21 @@
 import json
 import urllib.request
 import os
-
+from kaggle_secrets import UserSecretsClient
 # Пытаемся прочитать переменные из окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
-
 # Локально в VS Code подгружаем .env, если библиотека установлена
-if not TELEGRAM_BOT_TOKEN:
-    try:
-        from dotenv import load_dotenv
+try:
+    user_secrets = UserSecretsClient()
+    TELEGRAM_BOT_TOKEN = user_secrets.get_secret("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_USER_ID = user_secrets.get_secret("TELEGRAM_USER_ID")
+except Exception:
+    # Откат на os.getenv для локального запуска в VS Code
+    import os
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
 
-        load_dotenv()
-        TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-        TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
-    except ImportError:
-        pass
 
 def send_telegram_notification(text: str):
     """Отправляет текстовое уведомление в Telegram."""
