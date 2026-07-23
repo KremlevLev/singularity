@@ -21,6 +21,21 @@ model_dir = snapshot_download(
     allow_patterns=["*.json", "*.safetensors"]
 )
 print(f"Модель успешно скачана в локальный кэш: {model_dir}\n")
+config_path = os.path.join(model_dir, "config.json")
+
+with open(config_path, "r", encoding="utf-8") as f:
+    hf_config = json.load(f)
+
+HIDDEN_SIZE = hf_config["hidden_size"]
+INTERMEDIATE_SIZE = hf_config["intermediate_size"]
+NUM_LAYERS = hf_config["num_hidden_layers"]
+RMS_NORM_EPS = hf_config.get("rms_norm_eps", 1e-6)
+
+print("Конфигурация модели:")
+print(f"  hidden_size       = {HIDDEN_SIZE}")
+print(f"  intermediate_size = {INTERMEDIATE_SIZE}")
+print(f"  num_hidden_layers = {NUM_LAYERS}")
+print(f"  rms_norm_eps      = {RMS_NORM_EPS}")
 
 # =====================================================================
 # ШАГ 1: НАСТРОЙКА ГЕОМЕТРИИ ЖЕЛЕЗА (SHARDING)
@@ -54,10 +69,25 @@ class FlaxRMSNorm(nn.Module):
     eps: float = 1e-6
     @nn.compact
     def __call__(self, x):
-        weight = self.param("weight", nn.initializers.ones, (self.dim,))
-        variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        inv_rms = jax.lax.rsqrt(variance + self.eps)
-        return weight * (x * inv_rms)
+        weight = self.param(
+            "weight",
+            nn.initializers.ones,
+            (self.dim,),
+        )
+
+        input_dtype = x.dtype
+        x_float = x.astype(jnp.float32)
+
+        variance = jnp.mean(
+            jnp.square(x_float),
+            axis=-1,
+            keepdims=True,
+        )
+
+        normalized = x_float * jax.lax.rsqrt(variance + self.eps)
+        normalized = normalized.astype(input_dtype)
+
+        return normalized * weight
 
 class FlaxQwenMLP(nn.Module):
     hidden_size: int
@@ -71,6 +101,7 @@ class FlaxQwenMLP(nn.Module):
         return output
 
 class FlaxModelLayer(nn.Module):
+    @nn.compact
     def __call__(self, x):
         residual = x
         x = FlaxRMSNorm(dim=5120, name="input_layernorm")(x)
@@ -80,6 +111,7 @@ class FlaxModelLayer(nn.Module):
 # Обертка над всеми 40 слоями модели
 class FlaxQwenDecoder(nn.Module):
     num_layers: int = 40
+    @nn.compact
     def __call__(self, x):
         for i in range(self.num_layers):
             x = FlaxModelLayer(name=f"layers_{i}")(x)
@@ -89,10 +121,17 @@ class FlaxQwenDecoder(nn.Module):
 # ШАГ 3: ЗАГРУЗКА И НАРЕЗКА ВЕСОВ С ЛОКАЛЬНОГО КЭША HF
 # =====================================================================
 
-def load_and_shard_weights(model_dir, weight_map, sharding_repl_1d, sharding_col, sharding_row):
+def load_and_shard_weights(
+    model_dir,
+    weight_map,
+    num_layers,
+    sharding_repl_1d,
+    sharding_col,
+    sharding_row,
+):
     flax_params = {}
     
-    for i in range(40): 
+    for i in range(NUM_LAYERS): 
         layer_key = f"layers_{i}"
         flax_params[layer_key] = {"input_layernorm": {}, "mlp": {}}
 
@@ -135,7 +174,12 @@ def load_and_shard_weights(model_dir, weight_map, sharding_repl_1d, sharding_col
 # ШАГ 4: СКОМПИЛИРОВАННЫЙ ШАГ ИНФЕРЕНСА
 # =====================================================================
 
-model = FlaxQwenDecoder(num_layers=40)
+model = FlaxQwenDecoder(
+    num_layers=NUM_LAYERS,
+    hidden_size=HIDDEN_SIZE,
+    intermediate_size=INTERMEDIATE_SIZE,
+    rms_norm_eps=RMS_NORM_EPS,
+)
 
 @jax.jit
 def inference_step(weights, x):
@@ -153,22 +197,25 @@ print(f"[Шаг А] Нарезка и загрузка весов Qwen3-14B в {
 tpu_params = load_and_shard_weights(
     model_dir=model_dir,
     weight_map=weight_map,
-    sharding_repl_1d=sharding_repl_1d, # Передаем 1D маску
+    num_layers=NUM_LAYERS,
+    sharding_repl_1d=sharding_repl_1d,
     sharding_col=sharding_col,
-    sharding_row=sharding_row
+    sharding_row=sharding_row,
 )
 
 # Б. Подготовка входных токенов (передаем sharding_repl_3d для 3D-массива)
 print("[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim=5120)...")
 dummy_input = jnp.ones((1, 4, 5120), dtype=jnp.float32)
 tpu_tokens = jax.device_put(dummy_input, sharding_repl_3d) # Передаем 3D маску
-
 # В. Запуск вычислений в железе
 print("[Шаг В] Запуск JIT-компиляции графа и инференса на ядрах TPU...")
 output_hidden_states = inference_step(tpu_params, tpu_tokens)
+output_hidden_states.block_until_ready()
 
-print("\n" + "="*40)
-print(f" РЕЗУЛЬТАТ ИНФЕРЕНСА НА {num_devices} ЧИПАХ TPU:")
-print(f"Форма выходного тензора скрытых состояний: {output_hidden_states.shape}")
-print(f"Шардинг выхода: {output_hidden_states.sharding}")
-print("========================================")
+print("\n" + "=" * 60)
+print(f"Результат на {num_devices} устройствах")
+print(f"Форма: {output_hidden_states.shape}")
+print(f"Dtype: {output_hidden_states.dtype}")
+print(f"Шардинг: {output_hidden_states.sharding}")
+print(f"Среднее: {jnp.mean(output_hidden_states.astype(jnp.float32))}")
+print("=" * 60)
