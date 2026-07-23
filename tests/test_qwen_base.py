@@ -33,9 +33,17 @@ devices_mesh = devices.reshape(1, num_devices)
 mesh = Mesh(devices_mesh, ('data', 'tensor'))
 
 # Маски распределения весов на чипы
-sharding_repl = NamedSharding(mesh, P(None, None))    # Дублировать везде
-sharding_col = NamedSharding(mesh, P(None, 'tensor'))  # Разрезать столбцы
-sharding_row = NamedSharding(mesh, P('tensor', None))  # Разрезать строки
+# 1. Маска репликации для 1D-тензоров (RMSNorm веса)
+sharding_repl_1d = NamedSharding(mesh, P(None))
+
+# 2. Маска репликации для 3D-тензоров (входные токены)
+sharding_repl_3d = NamedSharding(mesh, P(None, None, None))
+
+# 3. Вертикальная маска для 2D-тензоров (матрицы Gate, Up)
+sharding_col = NamedSharding(mesh, P(None, 'tensor'))
+
+# 4. Горизонтальная маска для 2D-тензоров (матрицы Down)
+sharding_row = NamedSharding(mesh, P('tensor', None))
 
 # =====================================================================
 # ШАГ 2: СТРУКТУРА МОДЕЛИ НА FLAX
@@ -81,25 +89,21 @@ class FlaxQwenDecoder(nn.Module):
 # ШАГ 3: ЗАГРУЗКА И НАРЕЗКА ВЕСОВ С ЛОКАЛЬНОГО КЭША HF
 # =====================================================================
 
-def load_and_shard_weights(model_dir, weight_map, sharding_repl, sharding_col, sharding_row):
-    """
-    Послойно загружает оригинальные веса Qwen3-14B, сконвертированные
-    в LLaMA-формат, и распределяет их по чипам TPU.
-    """
+def load_and_shard_weights(model_dir, weight_map, sharding_repl_1d, sharding_col, sharding_row):
     flax_params = {}
     
     for i in range(40): 
         layer_key = f"layers_{i}"
         flax_params[layer_key] = {"input_layernorm": {}, "mlp": {}}
 
-        # 1. Загрузка RMSNorm
+        # ИСПОЛЬЗУЕМ 1D-МАСКУ ДЛЯ RMSNORM ВЕКТОРА
         norm_key = f"model.layers.{i}.input_layernorm.weight"
         norm_file = os.path.join(model_dir, weight_map[norm_key])
         with safe_open(norm_file, framework="np", device="cpu") as f:
             raw_norm = f.get_tensor(norm_key)
-        flax_params[layer_key]["input_layernorm"]["weight"] = jax.device_put(raw_norm, sharding_repl)
+        flax_params[layer_key]["input_layernorm"]["weight"] = jax.device_put(raw_norm, sharding_repl_1d)
         
-        # 2. Загрузка Gate & Up проекций (столбцы)
+        # 2. Загрузка Gate & Up проекций (2D)
         gate_key = f"model.layers.{i}.mlp.gate_proj.weight"
         gate_file = os.path.join(model_dir, weight_map[gate_key])
         with safe_open(gate_file, framework="np", device="cpu") as f:
@@ -112,14 +116,13 @@ def load_and_shard_weights(model_dir, weight_map, sharding_repl, sharding_col, s
             raw_up = f.get_tensor(up_key)
         flax_params[layer_key]["mlp"]["up_proj"]["kernel"] = jax.device_put(raw_up.T, sharding_col)
         
-        # 3. Загрузка Down проекции (строки)
+        # 3. Загрузка Down проекции (2D)
         down_key = f"model.layers.{i}.mlp.down_proj.weight"
         down_file = os.path.join(model_dir, weight_map[down_key])
         with safe_open(down_file, framework="np", device="cpu") as f:
             raw_down = f.get_tensor(down_key)
         flax_params[layer_key]["mlp"]["down_proj"]["kernel"] = jax.device_put(raw_down.T, sharding_row)
         
-        # Принудительная очистка RAM хоста
         del raw_norm, raw_gate, raw_up, raw_down
         gc.collect()
         
@@ -142,20 +145,20 @@ with open(os.path.join(model_dir, "model.safetensors.index.json"), "r") as f:
 # ШАГ 5: ОРКЕСТРАЦИЯ ЗАПУСКА
 # =====================================================================
 
-# А. Сборка модели на TPU
+# А. Сборка модели на TPU (передаем sharding_repl_1d)
 print(f"[Шаг А] Нарезка и загрузка весов Qwen3-14B в {num_devices} чипов TPU...")
 tpu_params = load_and_shard_weights(
     model_dir=model_dir,
     weight_map=weight_map,
-    sharding_repl=sharding_repl,
+    sharding_repl_1d=sharding_repl_1d, # Передаем 1D маску
     sharding_col=sharding_col,
     sharding_row=sharding_row
 )
 
-# Б. Подготовка входных токенов
+# Б. Подготовка входных токенов (передаем sharding_repl_3d для 3D-массива)
 print("[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim=5120)...")
 dummy_input = jnp.ones((1, 4, 5120), dtype=jnp.float32)
-tpu_tokens = jax.device_put(dummy_input, sharding_repl)
+tpu_tokens = jax.device_put(dummy_input, sharding_repl_3d) # Передаем 3D маску
 
 # В. Запуск вычислений в железе
 print("[Шаг В] Запуск JIT-компиляции графа и инференса на ядрах TPU...")
