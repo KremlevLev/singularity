@@ -9,7 +9,7 @@ from safetensors import safe_open
 import os
 import json
 from huggingface_hub import snapshot_download
-
+TEST_NUM_LAYERS = 1
 # =====================================================================
 # ШАГ 0: АВТОМАТИЧЕСКАЯ ЗАГРУЗКА QWEN3-14B С HUGGING FACE
 # =====================================================================
@@ -100,7 +100,7 @@ class FlaxQwenMLP(nn.Module):
         output = nn.Dense(features=self.hidden_size, use_bias=False, name="down_proj")(activated)
         return output
 
-class FlaxModelLayer(nn.Module):
+class FlaxMLPResidualBlock(nn.Module):
     hidden_size: int
     intermediate_size: int
     rms_norm_eps: float = 1e-6
@@ -112,7 +112,7 @@ class FlaxModelLayer(nn.Module):
         x = FlaxRMSNorm(
             dim=self.hidden_size,
             eps=self.rms_norm_eps,
-            name="input_layernorm",
+            name="post_attention_layernorm",
         )(x)
 
         x = FlaxQwenMLP(
@@ -124,6 +124,7 @@ class FlaxModelLayer(nn.Module):
         return residual + x
 
 
+
 class FlaxQwenDecoder(nn.Module):
     hidden_size: int
     intermediate_size: int
@@ -133,7 +134,7 @@ class FlaxQwenDecoder(nn.Module):
     @nn.compact
     def __call__(self, x):
         for i in range(self.num_layers):
-            x = FlaxModelLayer(
+            x = FlaxMLPResidualBlock(
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
                 rms_norm_eps=self.rms_norm_eps,
@@ -160,15 +161,26 @@ def load_and_shard_weights(
     for i in range(num_layers):
         layer_key = f"layers_{i}"
         flax_params[layer_key] = {
-            "input_layernorm": {},
+            "post_attention_layernorm": {},
             "mlp": {},
         }
+
         # ИСПОЛЬЗУЕМ 1D-МАСКУ ДЛЯ RMSNORM ВЕКТОРА
-        norm_key = f"model.layers.{i}.input_layernorm.weight"
+        norm_key = (
+            f"model.layers.{i}."
+            "post_attention_layernorm.weight"
+        )
+        
         norm_file = os.path.join(model_dir, weight_map[norm_key])
         with safe_open(norm_file, framework="np", device="cpu") as f:
             raw_norm = f.get_tensor(norm_key)
-        flax_params[layer_key]["input_layernorm"]["weight"] = jax.device_put(raw_norm, sharding_repl_1d)
+        flax_params[layer_key][
+            "post_attention_layernorm"
+        ]["weight"] = jax.device_put(
+            raw_norm,
+            sharding_repl_1d,
+        )
+
         
 # 2. Загрузка Gate & Up проекций (2D)
         gate_key = f"model.layers.{i}.mlp.gate_proj.weight"
@@ -266,4 +278,103 @@ print(f"Форма: {output_hidden_states.shape}")
 print(f"Dtype: {output_hidden_states.dtype}")
 print(f"Шардинг: {output_hidden_states.sharding}")
 print(f"Среднее: {float(output_mean)}")
+print("=" * 60)
+
+"""
+тестовые части
+"""
+
+import torch
+import torch.nn.functional as F
+
+def torch_rms_norm(x, weight, eps):
+    x_fp32 = x.float()
+    variance = x_fp32.square().mean(
+        dim=-1,
+        keepdim=True,
+    )
+    normalized = x_fp32 * torch.rsqrt(
+        variance + eps
+    )
+    return normalized.to(x.dtype) * weight.to(x.dtype)
+
+
+def torch_mlp_reference(
+    x,
+    norm_weight,
+    gate_weight,
+    up_weight,
+    down_weight,
+    eps,
+):
+    residual = x
+
+    x = torch_rms_norm(
+        x,
+        norm_weight,
+        eps,
+    )
+
+    # В PyTorch F.linear ожидает веса в форме [out_features, in_features]
+    gate = F.linear(x, gate_weight)
+    up = F.linear(x, up_weight)
+
+    x = F.silu(gate) * up
+    x = F.linear(x, down_weight)
+
+    return residual + x
+
+# 1. Готовим входной тензор для PyTorch
+# Он должен быть точно таким же, как и dummy_input в JAX (значения 1.0, тип bfloat16)
+x_torch = torch.ones((1, 4, HIDDEN_SIZE), dtype=torch.bfloat16)
+
+# 2. Последовательно прогоняем данные через все NUM_LAYERS слоев в PyTorch
+print(f"[Тест] Запуск референсного расчета в PyTorch для {NUM_LAYERS} слоев...")
+for i in range(NUM_LAYERS):
+    layer_key = f"layers_{i}"
+    
+    # Достаем JAX-веса текущего слоя из tpu_params
+    norm_weight_jax = tpu_params["params"][layer_key]["post_attention_layernorm"]["weight"]
+    gate_kernel_jax = tpu_params["params"][layer_key]["mlp"]["gate_proj"]["kernel"]
+    up_kernel_jax = tpu_params["params"][layer_key]["mlp"]["up_proj"]["kernel"]
+    down_kernel_jax = tpu_params["params"][layer_key]["mlp"]["down_proj"]["kernel"]
+    
+    # Конвертируем JAX-массивы в тензоры PyTorch через numpy-представление.
+    # В JAX Dense-ядро хранится как [in, out], поэтому транспонируем его (.T) обратно в [out, in] для PyTorch
+    norm_weight = torch.from_numpy(np.array(norm_weight_jax)).to(torch.bfloat16)
+    gate_weight = torch.from_numpy(np.array(gate_kernel_jax.T)).to(torch.bfloat16)
+    up_weight = torch.from_numpy(np.array(up_kernel_jax.T)).to(torch.bfloat16)
+    down_weight = torch.from_numpy(np.array(down_kernel_jax.T)).to(torch.bfloat16)
+    
+    # Вычисляем выход текущего слоя
+    x_torch = torch_mlp_reference(
+        x_torch,
+        norm_weight,
+        gate_weight,
+        up_weight,
+        down_weight,
+        eps=RMS_NORM_EPS,
+    )
+
+# Определяем reference_output для сравнения
+reference_output = x_torch
+
+# 3. Выполняем сравнение результатов
+jax_result = np.asarray(
+    jax.device_get(output_hidden_states)
+)
+
+torch_result = (
+    reference_output
+    .float()
+    .cpu()
+    .numpy()
+)
+
+abs_diff = np.abs(jax_result - torch_result)
+
+print("\n" + "=" * 60)
+print("СРАВНЕНИЕ ТОЧНОСТИ:")
+print("max abs diff:", abs_diff.max())
+print("mean abs diff:", abs_diff.mean())
 print("=" * 60)
