@@ -125,7 +125,116 @@ class FlaxMLPResidualBlock(nn.Module):
 
         return residual + x
 
+class FlaxQwenAttention(nn.Module):
+    hidden_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
 
+    @nn.compact
+    def __call__(self, x, position_ids, attention_mask=None):
+        batch_size, seq_len, _ = x.shape
+        
+        # 1. Проекции Q, K, V
+        q = nn.Dense(
+            self.num_attention_heads * self.head_dim,
+            use_bias=False,
+            name="q_proj",
+        )(x)  # (batch, seq, num_heads * head_dim)
+        
+        k = nn.Dense(
+            self.num_key_value_heads * self.head_dim,
+            use_bias=False,
+            name="k_proj",
+        )(x)  # (batch, seq, kv_heads * head_dim)
+        
+        v = nn.Dense(
+            self.num_key_value_heads * self.head_dim,
+            use_bias=False,
+            name="v_proj",
+        )(x)  # (batch, seq, kv_heads * head_dim)
+        
+        # 2. Reshape в多头形式
+        q = q.reshape(batch_size, seq_len, self.num_attention_heads, self.head_dim)
+        k = k.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+        v = v.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+        
+        # 3. QK-normalization (если есть в конфиге)
+        # Qwen3 использует qk_layernorm для всех моделей [8]
+        q = nn.RMSNorm(self.head_dim, name="q_norm")(q)
+        k = nn.RMSNorm(self.head_dim, name="k_norm")(k)
+        
+        # 4. RoPE
+        q, k = apply_rotary_emb(q, k, position_ids, self.rope_theta, self.head_dim)
+        
+        # 5. GQA: расширяем K, V до числа query-голов
+        # num_key_value_groups = num_attention_heads // num_key_value_heads
+        num_groups = self.num_attention_heads // self.num_key_value_heads
+        k = jnp.repeat(k, num_groups, axis=2)  # (batch, seq, num_heads, head_dim)
+        v = jnp.repeat(v, num_groups, axis=2)
+        
+        # 6. Scaled dot-product attention с causal mask
+        scale = 1.0 / jnp.sqrt(self.head_dim)
+        attn_weights = jnp.einsum("bqhd,bkhd->bhqk", q, k) * scale
+        
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        
+        # Causal mask
+        causal_mask = jnp.tril(jnp.ones((seq_len, seq_len)))
+        causal_mask = causal_mask.reshape(1, 1, seq_len, seq_len)
+        attn_weights = jnp.where(causal_mask == 0, -1e9, attn_weights)
+        
+        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32)).astype(q.dtype)
+        
+        # 7. Взвешенная сумма значений
+        attn_output = jnp.einsum("bhqk,bkhd->bqhd", attn_weights, v)
+        
+        # 8. Объединение голов
+        attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        
+        # 9. Выходная проекция
+        output = nn.Dense(
+            self.hidden_size,
+            use_bias=False,
+            name="o_proj",
+        )(attn_output)
+        
+        return output
+
+
+class FlaxQwenDecoderLayer(nn.Module):
+    hidden_size: int
+    intermediate_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+    rms_norm_eps: float = 1e-6
+
+    @nn.compact
+    def __call__(self, x, position_ids, attention_mask=None):
+        # Attention residual branch
+        residual = x
+        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="input_layernorm")(x)
+        x = FlaxQwenAttention(
+            hidden_size=self.hidden_size,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            rope_theta=self.rope_theta,
+            name="self_attn",
+        )(x, position_ids, attention_mask)
+        x = residual + x
+        
+        # MLP residual branch
+        residual = x
+        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="post_attention_layernorm")(x)
+        x = FlaxQwenMLP(hidden_size=self.hidden_size, intermediate_size=self.intermediate_size, name="mlp")(x)
+        x = residual + x
+        
+        return x
 
 class FlaxQwenDecoder(nn.Module):
     hidden_size: int
@@ -291,39 +400,11 @@ model = FlaxQwenDecoder(
     hidden_size=HIDDEN_SIZE,
     intermediate_size=INTERMEDIATE_SIZE,
     rms_norm_eps=RMS_NORM_EPS,
+    num_attention_heads=NUM_ATTENTION_HEADS,
+    num_key_value_heads=NUM_KEY_VALUE_HEADS,
+    head_dim=HEAD_DIM,
+    rope_theta=ROPE_THETA,
 )
-
-class FlaxQwenDecoderLayer(nn.Module):
-    hidden_size: int
-    intermediate_size: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    head_dim: int
-    rope_theta: float
-    rms_norm_eps: float = 1e-6
-
-    @nn.compact
-    def __call__(self, x, position_ids, attention_mask=None):
-        # Attention residual branch
-        residual = x
-        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="input_layernorm")(x)
-        x = FlaxQwenAttention(
-            hidden_size=self.hidden_size,
-            num_attention_heads=self.num_attention_heads,
-            num_key_value_heads=self.num_key_value_heads,
-            head_dim=self.head_dim,
-            rope_theta=self.rope_theta,
-            name="self_attn",
-        )(x, position_ids, attention_mask)
-        x = residual + x
-        
-        # MLP residual branch
-        residual = x
-        x = FlaxRMSNorm(dim=self.hidden_size, eps=self.rms_norm_eps, name="post_attention_layernorm")(x)
-        x = FlaxQwenMLP(hidden_size=self.hidden_size, intermediate_size=self.intermediate_size, name="mlp")(x)
-        x = residual + x
-        
-        return x
 
 
 @jax.jit
@@ -369,84 +450,6 @@ def apply_rotary_emb(q, k, position_ids, theta, head_dim):
     
     return q_rotated, k_rotated
 
-class FlaxQwenAttention(nn.Module):
-    hidden_size: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    head_dim: int
-    rope_theta: float
-
-    @nn.compact
-    def __call__(self, x, position_ids, attention_mask=None):
-        batch_size, seq_len, _ = x.shape
-        
-        # 1. Проекции Q, K, V
-        q = nn.Dense(
-            self.num_attention_heads * self.head_dim,
-            use_bias=False,
-            name="q_proj",
-        )(x)  # (batch, seq, num_heads * head_dim)
-        
-        k = nn.Dense(
-            self.num_key_value_heads * self.head_dim,
-            use_bias=False,
-            name="k_proj",
-        )(x)  # (batch, seq, kv_heads * head_dim)
-        
-        v = nn.Dense(
-            self.num_key_value_heads * self.head_dim,
-            use_bias=False,
-            name="v_proj",
-        )(x)  # (batch, seq, kv_heads * head_dim)
-        
-        # 2. Reshape в多头形式
-        q = q.reshape(batch_size, seq_len, self.num_attention_heads, self.head_dim)
-        k = k.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
-        v = v.reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
-        
-        # 3. QK-normalization (если есть в конфиге)
-        # Qwen3 использует qk_layernorm для всех моделей [8]
-        q = nn.RMSNorm(self.head_dim, name="q_norm")(q)
-        k = nn.RMSNorm(self.head_dim, name="k_norm")(k)
-        
-        # 4. RoPE
-        q, k = apply_rotary_emb(q, k, position_ids, self.rope_theta, self.head_dim)
-        
-        # 5. GQA: расширяем K, V до числа query-голов
-        # num_key_value_groups = num_attention_heads // num_key_value_heads
-        num_groups = self.num_attention_heads // self.num_key_value_heads
-        k = jnp.repeat(k, num_groups, axis=2)  # (batch, seq, num_heads, head_dim)
-        v = jnp.repeat(v, num_groups, axis=2)
-        
-        # 6. Scaled dot-product attention с causal mask
-        scale = 1.0 / jnp.sqrt(self.head_dim)
-        attn_weights = jnp.einsum("bqhd,bkhd->bhqk", q, k) * scale
-        
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        
-        # Causal mask
-        causal_mask = jnp.tril(jnp.ones((seq_len, seq_len)))
-        causal_mask = causal_mask.reshape(1, 1, seq_len, seq_len)
-        attn_weights = jnp.where(causal_mask == 0, -1e9, attn_weights)
-        
-        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32)).astype(q.dtype)
-        
-        # 7. Взвешенная сумма значений
-        attn_output = jnp.einsum("bhqk,bkhd->bqhd", attn_weights, v)
-        
-        # 8. Объединение голов
-        attn_output = attn_output.reshape(batch_size, seq_len, -1)
-        
-        # 9. Выходная проекция
-        output = nn.Dense(
-            self.hidden_size,
-            use_bias=False,
-            name="o_proj",
-        )(attn_output)
-        
-        return output
-
 
 
 # =====================================================================
@@ -481,10 +484,13 @@ tpu_tokens = jax.device_put(
 )
 
 print("[Шаг В] JIT-компиляция и инференс...")
+seq_len = 4
+position_ids = jnp.arange(seq_len)[None, :]  # (1, seq_len)
 
 output_hidden_states = inference_step(
     tpu_params,
     tpu_tokens,
+    position_ids,
 )
 
 output_hidden_states.block_until_ready()
@@ -502,15 +508,7 @@ print(f"Шардинг: {output_hidden_states.sharding}")
 print(f"Среднее: {float(output_mean)}")
 print("=" * 60)
 
-seq_len = 4
-position_ids = jnp.arange(seq_len)[None, :]  # (1, seq_len)
-
 # Для первого теста можно без маски
-output_hidden_states = inference_step(
-    tpu_params,
-    tpu_tokens,
-    position_ids,
-)
 
 
 """
