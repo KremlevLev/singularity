@@ -6,18 +6,3 @@
 ✅ data/collator.py — батчирование и padding
 ✅ data/data_mixer.py — смешивание датасетов по пропорциям
 
-будущее разделение квена
-
-singularity/
-├── config.py
-├── modeling/
-│   ├── norm.py
-│   ├── rope.py
-│   ├── attention.py
-│   ├── mlp.py
-│   └── qwen.py
-├── checkpoint/
-│   └── loader.py
-└── tests/
-    ├── test_tpu_smoke.py
-    └── test_layer_parity.py
