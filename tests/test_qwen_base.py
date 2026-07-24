@@ -134,6 +134,7 @@ class FlaxQwenAttention(nn.Module):
     head_dim: int
     rope_theta: float
     use_qk_norm: bool
+    rms_norm_eps: float = 1e-6
 
     @nn.compact
     def __call__(self, x, position_ids, attention_mask=None):
@@ -149,8 +150,18 @@ class FlaxQwenAttention(nn.Module):
         
         # QK-нормализация (только если веса присутствуют в конфиге)
         if self.use_qk_norm:
-            q = FlaxRMSNorm(dim=self.head_dim, name="q_norm")(q)
-            k = FlaxRMSNorm(dim=self.head_dim, name="k_norm")(k)
+            q = FlaxRMSNorm(
+                dim=self.head_dim,
+                eps=self.rms_norm_eps,
+                name="q_norm",
+            )(q)
+
+            k = FlaxRMSNorm(
+                dim=self.head_dim,
+                eps=self.rms_norm_eps,
+                name="k_norm",
+            )(k)
+
         
         q, k = apply_rotary_emb(q, k, position_ids, self.rope_theta, self.head_dim)
         
@@ -196,6 +207,7 @@ class FlaxQwenDecoderLayer(nn.Module):
             head_dim=self.head_dim,
             rope_theta=self.rope_theta,
             use_qk_norm=self.use_qk_norm,
+            rms_norm_eps=self.rms_norm_eps,
             name="self_attn",
         )(x, position_ids, attention_mask)
         x = residual + x
