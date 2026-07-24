@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import json
 from huggingface_hub import snapshot_download
 from scripts.tg_notifier import send_telegram_notification
-
+from config import assert_layer_keys
 notify=1
 if notify:
     send_telegram_notification("success")
@@ -78,6 +78,13 @@ sharding_repl_3d = NamedSharding(mesh, P(None, None, None))
 sharding_col = NamedSharding(mesh, P(None, 'tensor'))
 sharding_row = NamedSharding(mesh, P('tensor', None))
 
+
+assert_layer_keys(
+    weight_map=weight_map,
+    layer_idx=0,
+    has_qk_norm=HAS_QK_NORM,
+)
+
 # =====================================================================
 # ШАГ 2: СТРУКТУРА МОДЕЛИ НА FLAX (В ПРАВИЛЬНОМ ПОРЯДКЕ)
 # =====================================================================
@@ -126,6 +133,40 @@ def apply_rotary_emb(q, k, position_ids, theta, head_dim):
     q_rotated = jnp.concatenate([q1 * cos - q2 * sin, q1 * sin + q2 * cos], axis=-1)
     k_rotated = jnp.concatenate([k1 * cos - k2 * sin, k1 * sin + k2 * cos], axis=-1)
     return q_rotated, k_rotated
+
+def apply_rotary_emb1(q, k, position_ids, theta, head_dim):#проверить
+    inv_freq = 1.0 / (
+        theta ** (
+            jnp.arange(0, head_dim, 2, dtype=jnp.float32)
+            / head_dim
+        )
+    )
+
+    freqs = position_ids.astype(jnp.float32)[..., None] * inv_freq[None, None, :]
+    cos = jnp.cos(freqs)[:, :, None, :]
+    sin = jnp.sin(freqs)[:, :, None, :]
+
+    q1, q2 = q[..., :head_dim // 2], q[..., head_dim // 2:]
+    k1, k2 = k[..., :head_dim // 2], k[..., head_dim // 2:]
+
+    q_rotated = jnp.concatenate(
+        [
+            q1 * cos - q2 * sin,
+            q1 * sin + q2 * cos,
+        ],
+        axis=-1,
+    )
+
+    k_rotated = jnp.concatenate(
+        [
+            k1 * cos - k2 * sin,
+            k1 * sin + k2 * cos,
+        ],
+        axis=-1,
+    )
+
+    return q_rotated.astype(q.dtype), k_rotated.astype(k.dtype)
+
 
 class FlaxQwenAttention(nn.Module):
     hidden_size: int
@@ -346,7 +387,8 @@ def load_and_shard_weights(
 # =====================================================================
 # ШАГ 4: СКОМПИЛИРОВАННЫЙ ШАГ ИНФЕРЕНСА
 # =====================================================================
-
+assert NUM_ATTENTION_HEADS % NUM_KEY_VALUE_HEADS == 0
+assert NUM_ATTENTION_HEADS * HEAD_DIM == HIDDEN_SIZE
 model = FlaxQwenDecoder(
     num_layers=TEST_NUM_LAYERS,
     hidden_size=HIDDEN_SIZE,
@@ -377,6 +419,35 @@ tpu_params = load_and_shard_weights(
     sharding_row=sharding_row,
     has_qk_norm=HAS_QK_NORM,
 )
+#проверки первого слоя
+layer0 = tpu_params["params"]["layers_0"]
+
+assert layer0["input_layernorm"]["weight"].shape == (HIDDEN_SIZE,)
+assert layer0["post_attention_layernorm"]["weight"].shape == (HIDDEN_SIZE,)
+
+assert layer0["self_attn"]["q_proj"]["kernel"].shape == (
+    HIDDEN_SIZE,
+    NUM_ATTENTION_HEADS * HEAD_DIM,
+)
+assert layer0["self_attn"]["k_proj"]["kernel"].shape == (
+    HIDDEN_SIZE,
+    NUM_KEY_VALUE_HEADS * HEAD_DIM,
+)
+assert layer0["self_attn"]["v_proj"]["kernel"].shape == (
+    HIDDEN_SIZE,
+    NUM_KEY_VALUE_HEADS * HEAD_DIM,
+)
+assert layer0["self_attn"]["o_proj"]["kernel"].shape == (
+    NUM_ATTENTION_HEADS * HEAD_DIM,
+    HIDDEN_SIZE,
+)
+
+if HAS_QK_NORM:
+    assert layer0["self_attn"]["q_norm"]["weight"].shape == (HEAD_DIM,)
+    assert layer0["self_attn"]["k_norm"]["weight"].shape == (HEAD_DIM,)
+
+print("Проверка форм параметров layer 0 пройдена.")
+#-------------------
 
 print(f"[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim={HIDDEN_SIZE})...")
 dummy_input = jnp.ones(
@@ -388,6 +459,12 @@ tpu_tokens = jax.device_put(dummy_input, sharding_repl_3d)
 # Создание position_ids ДО вызова inference_step
 seq_len = 4
 position_ids = jnp.arange(seq_len)[None, :]  # (1, seq_len)
+sharding_repl_2d = NamedSharding(mesh, P(None, None))
+
+position_ids = jax.device_put(
+    jnp.arange(seq_len, dtype=jnp.int32)[None, :],
+    sharding_repl_2d,
+)
 
 print("[Шаг В] JIT-компиляция и инференс...")
 output_hidden_states = inference_step(
