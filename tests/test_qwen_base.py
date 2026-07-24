@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import json
 from huggingface_hub import snapshot_download
 from scripts.tg_notifier import send_telegram_notification
-from config import assert_layer_keys
+from config1 import assert_layer_keys
 notify=1
 if notify:
     send_telegram_notification("success")
