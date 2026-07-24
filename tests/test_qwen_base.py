@@ -366,7 +366,7 @@ tpu_params = load_and_shard_weights(
     has_qk_norm=HAS_QK_NORM,
 )
 
-print("[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim={HIDDEN_SIZE})...")
+print(f"[Шаг Б] Подготовка входного скрытого состояния (Batch=1, Seq=4, Dim={HIDDEN_SIZE})...")
 dummy_input = jnp.ones(
     (1, 4, HIDDEN_SIZE),
     dtype=jnp.bfloat16,
